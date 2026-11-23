@@ -180,6 +180,107 @@ public:
         }
     }
 
+    // ---- checkpoints (see ink_backend.h).  Every buffer is shared-storage and no command buffer is in flight between two
+    // forward_batch calls, so the copies are plain memcpy, as reset_slot's memset is.
+    size_t swa_ring_bytes() const {
+        const auto& c = mod_.man.c;
+        return (size_t)c.swa_win * (size_t)(c.n_kv * c.head_dim) * sizeof(uint16_t);
+    }
+
+    size_t ckpt_bytes() const override {
+        const auto& c = mod_.man.c;
+        size_t n = 0;
+        for (int v = 0; v < c.n_visits; ++v) {
+            if (c.is_swa[c.phys_for_visit(v)]) n += 2 * swa_ring_bytes();
+            n += 2 * 3ul * (size_t)(c.n_kv * c.head_dim) * 4 + 2 * 3ul * (size_t)c.hidden * 4;
+        }
+        return n + (size_t)c.hidden * 4;
+    }
+
+    int ckpt_save(int slot) override {
+        if (slot < 0 || slot >= runner_.max_slots) return -1;
+        const auto& c = mod_.man.c;
+        int h = -1;
+        for (size_t i = 0; i < ckpts_.size(); ++i) if (!ckpts_[i].used) { h = (int)i; break; }
+        if (h < 0) { ckpts_.emplace_back(); h = (int)ckpts_.size() - 1; }
+        SlotCkpt& k = ckpts_[(size_t)h];
+        k.used = true;
+        runner_.snapshot_slot(slot, k.sc);
+        k.frnn.clear();
+        if (runner_.use_dspark) {
+            const size_t D = (size_t)c.hidden;
+            k.frnn.resize(D);
+            std::memcpy(k.frnn.data(), runner_.dsp_frnn_slot.as<float>() + (size_t)slot * D, D * 4);
+        }
+        const size_t rb = swa_ring_bytes();
+        k.ring_k.assign((size_t)c.n_visits, {});
+        k.ring_v.assign((size_t)c.n_visits, {});
+        for (int v = 0; v < c.n_visits; ++v) {
+            if (!c.is_swa[c.phys_for_visit(v)]) continue;
+            k.ring_k[(size_t)v].resize(rb);
+            k.ring_v[(size_t)v].resize(rb);
+            std::memcpy(k.ring_k[(size_t)v].data(), runner_.kv_k[v].as<uint8_t>() + (size_t)slot * rb, rb);
+            std::memcpy(k.ring_v[(size_t)v].data(), runner_.kv_v[v].as<uint8_t>() + (size_t)slot * rb, rb);
+        }
+        return h;
+    }
+
+    bool ckpt_restore(int slot, int handle) override {
+        if (slot < 0 || slot >= runner_.max_slots || handle < 0 || handle >= (int)ckpts_.size() || !ckpts_[(size_t)handle].used) return false;
+        const auto& c = mod_.man.c;
+        const SlotCkpt& k = ckpts_[(size_t)handle];
+        reset_slot(slot);                       // the adaptive drafting state and the verify/tree rollback marks start over
+        runner_.restore_slot(slot, k.sc);
+        if (runner_.use_dspark && !k.frnn.empty()) {
+            const size_t D = (size_t)c.hidden;
+            std::memcpy(runner_.dsp_frnn_slot.as<float>() + (size_t)slot * D, k.frnn.data(), D * 4);
+        }
+        const size_t rb = swa_ring_bytes();
+        for (int v = 0; v < c.n_visits; ++v) {
+            if (!c.is_swa[c.phys_for_visit(v)] || k.ring_k[(size_t)v].size() != rb) continue;
+            std::memcpy(runner_.kv_k[v].as<uint8_t>() + (size_t)slot * rb, k.ring_k[(size_t)v].data(), rb);
+            std::memcpy(runner_.kv_v[v].as<uint8_t>() + (size_t)slot * rb, k.ring_v[(size_t)v].data(), rb);
+        }
+        return true;
+    }
+
+    bool kv_copy_prefix(int dst_slot, int src_slot, int n_pos) override {
+        if (dst_slot < 0 || src_slot < 0 || dst_slot >= runner_.max_slots || src_slot >= runner_.max_slots || n_pos <= 0) return false;
+        if (dst_slot == src_slot) return true;
+        const auto& c = mod_.man.c;
+        const size_t row = (size_t)(c.n_kv * c.head_dim) * sizeof(uint16_t);       // one position: [8, 128] half
+        for (int v = 0; v < c.n_visits; ++v) {
+            if (c.is_swa[c.phys_for_visit(v)]) continue;                           // the rings come with the checkpoint
+            const size_t stride = (size_t)runner_.visit_kv_stride[v];
+            if ((size_t)n_pos > stride) return false;
+            std::memcpy(runner_.kv_k[v].as<uint8_t>() + (size_t)dst_slot * stride * row,
+                        runner_.kv_k[v].as<uint8_t>() + (size_t)src_slot * stride * row, (size_t)n_pos * row);
+            std::memcpy(runner_.kv_v[v].as<uint8_t>() + (size_t)dst_slot * stride * row,
+                        runner_.kv_v[v].as<uint8_t>() + (size_t)src_slot * stride * row, (size_t)n_pos * row);
+        }
+        if (runner_.use_dspark) {
+            const size_t stride = (size_t)runner_.max_ctx;
+            if ((size_t)n_pos > stride) return false;
+            for (int l = 0; l < 3; ++l) {
+                std::memcpy(runner_.dsp_ctx_k[l].as<uint8_t>() + (size_t)dst_slot * stride * row,
+                            runner_.dsp_ctx_k[l].as<uint8_t>() + (size_t)src_slot * stride * row, (size_t)n_pos * row);
+                std::memcpy(runner_.dsp_ctx_v[l].as<uint8_t>() + (size_t)dst_slot * stride * row,
+                            runner_.dsp_ctx_v[l].as<uint8_t>() + (size_t)src_slot * stride * row, (size_t)n_pos * row);
+            }
+        }
+        return true;
+    }
+
+    void ckpt_free(int handle) override {
+        if (handle < 0 || handle >= (int)ckpts_.size()) return;
+        SlotCkpt& k = ckpts_[(size_t)handle];
+        k.used = false;
+        std::vector<std::vector<uint8_t>>().swap(k.ring_k);
+        std::vector<std::vector<uint8_t>>().swap(k.ring_v);
+        k.sc = ink_metal::InkMetalRunner::SlotSconvSnap();
+        std::vector<float>().swap(k.frnn);
+    }
+
     bool forward_batch(const StepBatch& batch, float* logits_out, TapCapture* taps_out, std::string& err) override {
         if (batch.n_tokens <= 0) return true;
         // Auto-slice oversized multi-slot prefill batches (e.g. --bench --parallel 64 --prompt-len 64 -> M=4096)
@@ -444,6 +545,13 @@ private:
     ink_metal::InkMetalModel mod_;
     ink_metal::InkMetalRunner runner_;
     std::vector<ink_metal::InkMetalRunner::SlotSconvSnap> snaps_;
+    struct SlotCkpt {
+        bool used = false;
+        ink_metal::InkMetalRunner::SlotSconvSnap sc;
+        std::vector<float> frnn;
+        std::vector<std::vector<uint8_t>> ring_k, ring_v;      // [n_visits]: the SWA visits' KV rings of the slot
+    };
+    std::vector<SlotCkpt> ckpts_;
     std::vector<std::vector<float>> frnn_snaps_;
     std::vector<uint8_t> slot_used_;
     std::vector<int> slot_beam_depth_;
