@@ -621,6 +621,10 @@ MODEL_CARD_SAMPLING = {
     # Hy4-Flash (HY-4-Flash-200B): HuggingFace model card defaults when request/config omits sampling
     "hy4flash": {"thinking": {"temperature": 0.9, "top_p": 1.0},
                  "instruct": {"temperature": 0.9, "top_p": 1.0}},
+    # Inkling-2-Mini: the model's generation_config.json is do_sample with temperature 1.0 and nothing else.  Without this entry a
+    # request that named no temperature ran greedy, and a greedy agent turn that once repeated itself repeated for good (a session
+    # wrote the same sentence and the same shell call 14 turns in a row; at 1.0 the same turn moved on in 3 of 3 tries).
+    "inkling2_loop": {"thinking": {"temperature": 1.0}, "instruct": {"temperature": 1.0}},
 }
 
 
