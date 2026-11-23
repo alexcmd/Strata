@@ -374,7 +374,7 @@ class TestInklingServing(unittest.TestCase):
         reason = "".join(e.text for e in events if e.kind == "reasoning")
         content = "".join(e.text for e in events if e.kind == "content")
         calls = [e.call for e in events if e.kind == "tool_call"]
-        self.assertEqual(reason, "")
+        self.assertEqual(reason, "Let me check Tokyo weather.")
         self.assertIn("Checking now.", content)
         self.assertEqual(len(calls), 1)
         self.assertEqual(calls[0].name, "get_weather")
@@ -397,9 +397,11 @@ class TestInklingServing(unittest.TestCase):
         self.assertIn("a < b && c > 0", calls2[0].arguments["code"])
 
     def test_reasoning_effort_and_parallel_64_args(self):
-        # Inkling-2-Mini has no thinking mode: default is off ("none") and every input normalizes to "none".
-        for k in ("none", "off", "minimal", "low", "medium", "high", "max"):
+        # the default is off ("none"); a level the model's template knows is kept
+        for k in ("none", "off"):
             self.assertEqual(inkling_dialect.normalize_effort(k), "none")
+        for k in ("minimal", "low", "medium", "high", "max"):
+            self.assertEqual(inkling_dialect.normalize_effort(k), k)
         cfg = {"arch": "inkling2_loop", "exe": "component:strata-inkling", "args": ["--native", "m.strata"], "parallel": 64}
         self.assertEqual(srv_engines.parallel_args(cfg, list(cfg["args"])), ["--parallel", "64"])
         self.assertTrue(inkling_kind.is_inkling(cfg))

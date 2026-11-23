@@ -257,7 +257,7 @@ class TestInklingServeE2E(unittest.TestCase):
                     "messages": [{"role": "user", "content": "Say hi"}],
                 })
                 msg1 = r1["choices"][0]["message"]
-                self.assertFalse(msg1.get("reasoning_content"))
+                self.assertEqual(msg1.get("reasoning_content"), "Quick thought.")       # the thinking is the reply's reasoning (it was dropped)
                 self.assertEqual(msg1["content"], "Hello from Inkling!")
 
                 # 2. Tool call round-trip with XML special chars
@@ -295,17 +295,17 @@ class TestInklingServeE2E(unittest.TestCase):
                     "messages": [{"role": "user", "content": "Ping"}],
                 })
                 blocks = {b["type"]: b for b in r4["content"]}
-                self.assertNotIn("thinking", blocks)
+                self.assertEqual(blocks["thinking"]["thinking"], "Anthropic check.")
                 self.assertEqual(blocks["text"]["text"], "Anthropic OK.")
 
                 # Verify wire protocol recorded exact reasoning effort levels & image= key
                 lines = h.record_path.read_text(encoding="utf-8").splitlines()
                 self.assertEqual(len(lines), 4)
-                # Decode prompt tokens: Inkling-2-Mini has no thinking mode so all requests render Thinking effort level: 0.0
+                # Decode prompt tokens: each request's reasoning_effort is rendered as the template's level
                 p1 = h.tok.decode([int(x) for x in lines[0].split()[-1].split(",")])
                 p2 = h.tok.decode([int(x) for x in lines[1].split()[-1].split(",")])
-                self.assertIn("Thinking effort level: 0.0", p1)
-                self.assertIn("Thinking effort level: 0.0", p2)
+                self.assertIn("Thinking effort level: 0.2", p1)          # "low", as the request asked
+                self.assertNotIn("Thinking effort level: 0.0", p2)       # "max"
                 self.assertIn("image=", lines[2])
 
     def test_concurrent_streaming_4_8_32_64(self):
@@ -331,7 +331,7 @@ class TestInklingServeE2E(unittest.TestCase):
                     self.assertEqual(len(results), conc)
                     for txt, thk in results:
                         self.assertEqual(txt, "Batch OK.", f"failed at c={conc}")
-                        self.assertEqual(thk, "", f"unexpected reasoning leaked at c={conc}")
+                        self.assertEqual(thk, "Parallel slot.", f"the reasoning of the reply at c={conc}")
 
 
 if __name__ == "__main__":

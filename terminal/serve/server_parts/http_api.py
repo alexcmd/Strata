@@ -613,6 +613,10 @@ MODEL_CARD_SAMPLING = {
     # Qwen3.6-35B-A3B: the general-task sets (the card's precise-coding set is temperature 0.6, presence_penalty 0)
     "qwen35moe": {"thinking": {"temperature": 1.0, "top_p": 0.95, "top_k": 20, "presence_penalty": 1.5},
                   "instruct": {"temperature": 0.7, "top_p": 0.8, "top_k": 20, "presence_penalty": 1.5}},
+    # Inkling-2-Mini: the model's generation_config.json is do_sample with temperature 1.0 and nothing else.  Without this entry a
+    # request that named no temperature ran greedy, and a greedy agent turn that once repeated itself repeated for good (a session
+    # wrote the same sentence and the same shell call 14 turns in a row; at 1.0 the same turn moved on in 3 of 3 tries).
+    "inkling2_loop": {"thinking": {"temperature": 1.0}, "instruct": {"temperature": 1.0}},
 }
 
 
